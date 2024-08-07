@@ -1,45 +1,81 @@
-name: Windows-RDP
+name: The Bot Host
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  schedule:
+    - cron: "*/30 * * * *"
 
 jobs:
   build:
-
-    runs-on: windows-latest
-    timeout-minutes: 9999
+    runs-on: ubuntu-latest
 
     steps:
-    - name: Downloading ngrok.
-      run: |
-        Invoke-WebRequest https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip -OutFile ngrok.zip
-        Invoke-WebRequest https://raw.githubusercontent.com/vngithubdev/rdp-resources/main/start.bat -OutFile start.bat
-        Invoke-WebRequest https://raw.githubusercontent.com/vngithubdev/rdp-resources/main/wallpaper.png -OutFile wallpaper.png
-        Invoke-WebRequest https://raw.githubusercontent.com/vngithubdev/rdp-resources/main/wallpaper.bat -OutFile wallpaper.bat
-        Invoke-WebRequest https://raw.githubusercontent.com/vngithubdev/rdp-resources/main/loop.bat -OutFile loop.bat
-    - name: Load Launcher.
-      run: |
-        Invoke-WebRequest https://raw.githubusercontent.com/vngithubdev/rdp-resources/main/launcher/Node.js.lnk -OutFile Node.js.lnk
-        Invoke-WebRequest https://raw.githubusercontent.com/vngithubdev/rdp-resources/main/launcher/Visual%20Studio%202019.lnk -OutFile "Visual Studio 2019.lnk"
-        Invoke-WebRequest https://github.com/vngithubdev/rdp-resources/raw/main/launcher/Ganti%20Password.exe -OutFile "Ganti Password.exe"
-    - name: Extracting ngrok.
-      run: Expand-Archive ngrok.zip
-    - name: Connect ngrok.
-      run: .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
-      env:
-        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-    - name: Creating RDP.
-      run: | 
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server'-name "fDenyTSConnections" -Value 0
-        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
-        copy wallpaper.png D:\a\wallpaper.png
-        copy wallpaper.bat D:\a\wallpaper.bat
-        copy Node.js.lnk C:\Users\Public\Desktop\Node.js.lnk
-        copy "Visual Studio 2019.lnk" "C:\Users\Public\Desktop\Visual Studio 2019.lnk"
-        copy "Ganti Password.exe" "C:\Users\Public\Desktop\Ganti Password.exe"
-    - name: Making tunnels
-      run: Start-Process Powershell -ArgumentList '-Noexit -Command ".\ngrok\ngrok.exe tcp --region ap 3389"'
-    - name: Connect RDP CPU 2 Core - 7GB Ram - 256 SSD.
-      run: cmd /c start.bat
-    - name: Successful implementation! You can close the tab now.
-      run: cmd /c loop.bat
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: 16
+
+      - name: Export terminal environment variable and set limit of usage and net limit
+        run: |
+          sudo apt install cpulimit
+          export TERM=xterm
+          ulimit -m 1024
+          cpulimit --all -c 1 -v
+          sudo apt-get install iproute2
+          echo '#!/bin/bash' > network-limit.sh
+          echo 'IFACE=$(ip link show | awk '\''/state UP/ {print $2}'\'' | sed '\''s/:$//'\'')'  >> network-limit.sh
+          echo 'UPLOAD_LIMIT=5000  # 5 Mbit/s' >> network-limit.sh
+          echo 'DOWNLOAD_LIMIT=15000  # 15 Mbit/s' >> network-limit.sh
+          echo 'tc qdisc add dev $IFACE root tbf rate ${UPLOAD_LIMIT}kbit burst 640k latency 50ms' >> network-limit.sh
+          echo 'tc qdisc add dev $IFACE handle 1: root htb default 10' >> network-limit.sh
+          echo 'tc class add dev $IFACE parent 1: classid 1:10 htb rate ${DOWNLOAD_LIMIT}kbit' >> network-limit.sh
+          chmod +x network-limit.sh
+          sudo ./network-limit.sh &
+          IFACE=$(ip link show | awk '/state UP/ {print $2}' | sed 's/:$//')
+          sudo tc qdisc show dev $IFACE
+
+      
+      - name: Clone repository
+        run: git clone https://github.com/AbhishekSuresh2/Phoenix-MD
+
+      - name: Install project dependencies
+        run: |
+          cd 9292939
+          rm -rf package-lock.json && rm -rf node_modules && npm i
+
+      - name: Start The Code
+        run: |
+          cd 9292939
+          node . &
+
+      - name: Keep workflow running
+        id: check_runs
+        run: |
+          echo "has_new_run=false" >> $GITHUB_OUTPUT
+          while true; do
+            sleep 10
+            latest_run=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs?per_page=1&status=queued&status=in_progress" | \
+              jq -r '.workflow_runs[0].id')
+            if [[ $latest_run != ${{ github.run_id }} ]]; then
+              echo "has_new_run=true" >> $GITHUB_OUTPUT
+              break
+            fi
+          done
+
+      - name: Stop workflow if new run detected
+        if: steps.check_runs.outputs.has_new_run == 'true'
+        run: exit 0
+
+      - name: Keep workflow running
+        if: steps.check_runs.outputs.has_new_run == 'false'
+        run: sleep 60
